@@ -80,76 +80,8 @@ class SearchManagerMixIn(object):
 
         super(SearchManagerMixIn, self).contribute_to_class(cls, name)
 
-
-    def search(self, query, rank_field=None, rank_function='ts_rank', config=None,
-                rank_normalization=32, raw=False, using=None, fields=None):
-        '''
-        Convert query with to_tsquery or plainto_tsquery, depending on raw is
-        `True` or `False`, and return a QuerySet with the filter.
-
-        If `rank_field` is not `None`, a field with this name will be added containing the
-        search rank of the instances, and the queryset will be ordered by it. The
-        rank_function and normalization are explained here:
-
-        http://www.postgresql.org/docs/9.1/interactive/textsearch-controls.html#TEXTSEARCH-RANKING
-
-        If an empty query is given, no filter is made so the QuerySet will return
-        all model instances.
-
-        If `fields` is not `None`, the filter is made  with this fields istead of
-        defined on a constructor of manager.
-        '''
-
-        if not config:
-            config = self.config
-
-        db_alias = using if using is not None else self.db
-        connection = connections[db_alias]
-        qn = connection.ops.quote_name
-
-        qs = self.all()
-        if using is not None:
-            qs = qs.using(using)
-
-        if query:
-            function = "to_tsquery" if raw else "plainto_tsquery"
-            ts_query = "%s('%s', '%s')" % (
-                function,
-                config,
-                force_text(query).replace("'","''")
-            )
-
-            full_search_field = "%s.%s" % (
-                qn(self.model._meta.db_table),
-                qn(self.search_field)
-            )
-
-            # if fields is passed, obtain a vector expression with
-            # these fields. In other case, intent use of search_field if
-            # exists.
-            if fields:
-                search_vector = self._get_search_vector(config, using, fields=fields)
-            else:
-                if not self.search_field:
-                    raise ValueError("search_field is not specified")
-
-                search_vector = full_search_field
-
-            where = " (%s) @@ (%s)" % (search_vector, ts_query)
-            select_dict, order = {}, []
-
-            if rank_field:
-                select_dict[rank_field] = '%s(%s, %s, %d)' % (
-                    rank_function,
-                    full_search_field,
-                    ts_query,
-                    rank_normalization
-                )
-                order = ['-%s' % (rank_field,)]
-
-            qs = qs.extra(select=select_dict, where=[where], order_by=order)
-
-        return qs
+    def search(self, *args, **kwargs):
+        return self.get_query_set().search(*args, **kwargs)
 
     def update_search_field(self, pk=None, config=None, using=None):
         '''
@@ -269,6 +201,90 @@ class SearchManagerMixIn(object):
 
         return "setweight(to_tsvector('%s', coalesce(%s.%s, '')), '%s')" % \
                     (config, qn(self.model._meta.db_table), qn(field.column), weight)
+
+
+class SearchQuerySetMixIn(object):
+    """
+    A mixin to create a QuerySet with a 'search' method that may do a full text search
+    with queryset.
+    """
+
+    def __init__(self, model=None, query=None, using=None):
+        self.search_field = model.objects.search_field
+        self.default_weight = 'D'
+        self.config = model.objects.config
+        self.auto_update_search_field = model.objects.auto_update_search_field
+        self._fields = model.objects._fields
+
+        super(SearchQuerySetMixIn, self).__init__(model, query, using)
+
+    def search(self, query, rank_field=None, rank_function='ts_rank', config=None,
+                rank_normalization=32, raw=False, using=None, fields=None):
+        '''
+        Convert query with to_tsquery or plainto_tsquery, depending on raw is
+        `True` or `False`, and return a QuerySet with the filter.
+
+        If `rank_field` is not `None`, a field with this name will be added containing the
+        search rank of the instances, and the queryset will be ordered by it. The
+        rank_function and normalization are explained here:
+
+        http://www.postgresql.org/docs/9.1/interactive/textsearch-controls.html#TEXTSEARCH-RANKING
+
+        If an empty query is given, no filter is made so the QuerySet will return
+        all model instances.
+
+        If `fields` is not `None`, the filter is made  with this fields istead of
+        defined on a constructor of manager.
+        '''
+
+        if not config:
+            config = self.config
+
+        db_alias = using if using is not None else self.db
+        connection = connections[db_alias]
+        qn = connection.ops.quote_name
+
+        qs = self._clone()
+
+        if query:
+            function = "to_tsquery" if raw else "plainto_tsquery"
+            ts_query = "%s('%s', '%s')" % (
+                function,
+                config,
+                force_text(query).replace("'","''")
+            )
+
+            full_search_field = "%s.%s" % (
+                qn(self.model._meta.db_table),
+                qn(self.search_field)
+            )
+
+            # if fields is passed, obtain a vector expression with
+            # these fields. In other case, intent use of search_field if
+            # exists.
+            if fields:
+                search_vector = self.objects._get_search_vector(config, using, fields=fields)
+            else:
+                if not self.search_field:
+                    raise ValueError("search_field is not specified")
+
+                search_vector = full_search_field
+
+            where = " (%s) @@ (%s)" % (search_vector, ts_query)
+            select_dict, order = {}, []
+
+            if rank_field:
+                select_dict[rank_field] = '%s(%s, %s, %d)' % (
+                    rank_function,
+                    full_search_field,
+                    ts_query,
+                    rank_normalization
+                )
+                order = ['-%s' % (rank_field,)]
+
+            qs = qs.extra(select=select_dict, where=[where], order_by=order)
+
+        return qs
 
 
 class SearchManager(SearchManagerMixIn, models.Manager):
